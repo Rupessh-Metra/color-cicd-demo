@@ -60,7 +60,7 @@ PAGE = """<!doctype html>
       <dt>Commit</dt><dd>{{ version }}</dd>
       <dt>Container started</dt><dd>{{ started }}</dd>
     </dl>
-    <footer>Push a change to main and watch this page turn a new colour (auto-refreshes every 10 s).</footer>
+    <footer>Demo push 1 - deployed by GitHub Actions</footer>
   </main>
 </body>
 </html>"""
