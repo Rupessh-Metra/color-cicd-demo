@@ -60,7 +60,7 @@ PAGE = """<!doctype html>
       <dt>Commit</dt><dd>{{ version }}</dd>
       <dt>Container started</dt><dd>{{ started }}</dd>
     </dl>
-    <footer>Demo push 1 - deployed by GitHub Actions</footer>
+    <footer>Demo push 2 - deployed by GitHub Actions</footer>
   </main>
 </body>
 </html>"""
