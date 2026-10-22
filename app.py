@@ -91,6 +91,3 @@ def info():
         started=STARTED_AT,
     )
 
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)  # NOSONAR - must listen on all interfaces inside a container
