@@ -1,0 +1,177 @@
+name: CI/CD Pipeline
+
+# When does the pipeline run?
+on:
+  push:
+    branches: [main]        # every push to main -> full pipeline incl. deploy
+  pull_request:
+    branches: [main]        # pull requests -> checks only, no push / deploy
+  workflow_dispatch:        # "Run workflow" button in the Actions tab
+
+# Only one deployment at a time
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# Settings come from repo Settings > Secrets and variables > Actions:
+#   Variables: DOCKERHUB_USERNAME, EC2_HOST, EC2_USER
+#   Secrets:   DOCKERHUB_TOKEN, SONAR_TOKEN, EC2_SSH_KEY
+env:
+  IMAGE_NAME: color-cicd-demo
+  APP_PORT: "8080"            # port on the EC2 instance -> http://<public-ip>:8080
+  CONTAINER_NAME: color-app
+
+jobs:
+  # ---------------------------------------------------------------- 1. CHECKOUT + BUILD + TEST
+  build-and-test:
+    name: 1. Checkout, build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (build)
+        run: pip install -r requirements-dev.txt
+
+      - name: Run unit tests with coverage
+        run: pytest --cov=app --cov-report=xml --cov-report=term
+
+      - name: Save coverage report for SonarQube
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage.xml
+
+  # ---------------------------------------------------------------- 2. STATIC CODE ANALYSIS
+  sonarqube:
+    name: 2. Static code analysis (SonarQube)
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code (full history for SonarQube)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Get the coverage report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage
+
+      - name: SonarQube scan + Quality Gate
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ---------------------------------------------------------------- 3. IMAGE BUILD + 4. IMAGE SCAN
+  docker-image:
+    name: 3. Build image, scan (Trivy) & push
+    needs: sonarqube
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Work out image name and tags
+        id: meta
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE="${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${SHORT_SHA}"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "latest=${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build the Docker image
+        run: |
+          docker build \
+            --build-arg APP_VERSION=${{ steps.meta.outputs.short_sha }} \
+            --build-arg BUILD_NUMBER=${{ github.run_number }} \
+            -t ${{ steps.meta.outputs.image }} \
+            -t ${{ steps.meta.outputs.latest }} \
+            .
+          docker images
+
+      - name: Trivy scan - full report (HIGH + CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: "0"
+
+      - name: Trivy gate - fail on fixable CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push the image to Docker Hub
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push ${{ steps.meta.outputs.image }}
+          docker push ${{ steps.meta.outputs.latest }}
+
+  # ---------------------------------------------------------------- 5. DEPLOY + RUN ON EC2
+  deploy:
+    name: 4. Deploy & run on EC2
+    needs: docker-image
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull the new image and restart the container on EC2
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          IMAGE: ${{ needs.docker-image.outputs.image }}
+        with:
+          host: ${{ vars.EC2_HOST }}
+          username: ${{ vars.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: IMAGE,APP_PORT,CONTAINER_NAME
+          script: |
+            set -e
+            echo "Deploying $IMAGE"
+            docker pull "$IMAGE"
+            docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+            docker run -d \
+              --name "$CONTAINER_NAME" \
+              --restart unless-stopped \
+              -p "$APP_PORT":5000 \
+              "$IMAGE"
+            docker ps --filter "name=$CONTAINER_NAME"
+            docker image prune -f
+
+      - name: Check the live app answers
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          curl --fail --silent --show-error \
+            --retry 10 --retry-delay 3 --retry-all-errors \
+            "http://${EC2_HOST}:${APP_PORT}/api/info"
+          echo
+          {
+            echo "### Deployed :rocket:"
+            echo "Build **#${{ github.run_number }}** is live at **http://${EC2_HOST}:${APP_PORT}**"
+          } >> "$GITHUB_STEP_SUMMARY"
