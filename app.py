@@ -53,7 +53,7 @@ PAGE = """<!doctype html>
 </head>
 <body>
   <main>
-    <h1>Hi this is the demo for stride program from the devops team!!!</h1>
+    <h1>Hello this is the demo for stride program from the devops team!!!</h1>
     <div class="swatch">This build's colour is <b>{{ color }}</b></div>
     <dl>
       <dt>Build number</dt><dd>#{{ build }}</dd>
