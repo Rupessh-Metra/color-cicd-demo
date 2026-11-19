@@ -1,5 +1,5 @@
 # Small, official Python base image
-FROM python:3.12-alpine
+FROM python:3.15-alpine
 
 # Build information, passed in by the pipeline (docker build --build-arg ...)
 ARG APP_VERSION=local
